@@ -1,10 +1,19 @@
-"""DHT22 sensor access with modern or legacy library fallback."""
+"""DHT22 sensor access with pigpio, modern, or legacy library fallback."""
 
 from config import DHT22_GPIO
 
-USE_LEGACY = False
+BACKEND = None
 dht_device = None
 _legacy_sensor_type = None
+_pigpio_gpio = None
+
+SUPPORTED_GPIO = (4, 7, 17, 22, 27)
+
+
+def _validate_gpio(gpio_number):
+    if gpio_number not in SUPPORTED_GPIO:
+        supported = ", ".join(str(n) for n in SUPPORTED_GPIO)
+        raise ValueError("Unsupported GPIO {}. Supported BCM pins: {}".format(gpio_number, supported))
 
 
 def _init_modern(gpio_number):
@@ -25,30 +34,53 @@ def _init_modern(gpio_number):
     return adafruit_dht.DHT22(pin)
 
 
+def _init_pigpio(gpio_number):
+    import pigpio
+
+    pi = pigpio.pi()
+    if not pi.connected:
+        raise RuntimeError("pigpiod is not running. Start it with: sudo pigpiod")
+    pi.stop()
+    return gpio_number
+
+
 def init_sensor(gpio_number=DHT22_GPIO):
-    global USE_LEGACY, dht_device, _legacy_sensor_type
+    global BACKEND, dht_device, _legacy_sensor_type, _pigpio_gpio
+
+    _validate_gpio(gpio_number)
 
     try:
         dht_device = _init_modern(gpio_number)
-        USE_LEGACY = False
+        BACKEND = "modern"
         _legacy_sensor_type = None
+        _pigpio_gpio = None
     except ImportError:
-        import Adafruit_DHT
+        try:
+            _pigpio_gpio = _init_pigpio(gpio_number)
+            BACKEND = "pigpio"
+            dht_device = None
+            _legacy_sensor_type = None
+        except (ImportError, RuntimeError):
+            import Adafruit_DHT
 
-        dht_device = None
-        _legacy_sensor_type = Adafruit_DHT.DHT22
-        USE_LEGACY = True
+            dht_device = None
+            _legacy_sensor_type = Adafruit_DHT.DHT22
+            _pigpio_gpio = None
+            BACKEND = "legacy"
 
-    return dht_device or _legacy_sensor_type
+    return dht_device or _legacy_sensor_type or _pigpio_gpio
 
 
 def read_sensor(gpio_number=DHT22_GPIO):
-    if USE_LEGACY and _legacy_sensor_type is None:
-        init_sensor(gpio_number)
-    elif not USE_LEGACY and dht_device is None:
+    if BACKEND is None:
         init_sensor(gpio_number)
 
-    if USE_LEGACY:
+    if BACKEND == "pigpio":
+        from pigpio_dht22 import read_dht22
+
+        return read_dht22(gpio_number)
+
+    if BACKEND == "legacy":
         import Adafruit_DHT
 
         humidity, temperature_c = Adafruit_DHT.read_retry(
@@ -69,8 +101,10 @@ def read_sensor(gpio_number=DHT22_GPIO):
 
 
 def close_sensor():
-    global dht_device, _legacy_sensor_type
-    if dht_device is not None and not USE_LEGACY and hasattr(dht_device, "exit"):
+    global dht_device, _legacy_sensor_type, _pigpio_gpio, BACKEND
+    if dht_device is not None and BACKEND == "modern" and hasattr(dht_device, "exit"):
         dht_device.exit()
     dht_device = None
     _legacy_sensor_type = None
+    _pigpio_gpio = None
+    BACKEND = None
